@@ -1,6 +1,25 @@
 const std = @import("std");
 const json = std.json;
 
+// ============================================================================
+// MEMORY MANAGEMENT GUIDE
+// ============================================================================
+//
+// Methods that return ParsedResult(T):
+//   - clone() - Deep clone entire config
+//   - cloneField() - Clone specific field
+//   - takeSnapshot() returns ConfigSnapshot which contains ParsedResult
+//
+// Usage Pattern:
+//   var result = try manager.clone();
+//   defer result.deinit();          // <-- Required to avoid leaks
+//   const value = result.value;     // Access the actual config
+//
+// ParsedResult owns all memory via its arena allocator.
+// Calling deinit() frees everything allocated during parsing.
+//
+// ============================================================================
+
 pub const ConfigError = error{
     InvalidConfigFile,
     ParseError,
@@ -60,6 +79,46 @@ pub const DiffOptions = struct {
     compare_string_contents: bool = true,
     include_unchanged: bool = false,
 };
+
+/// Wrapper for parsed config data with owned arena allocator
+/// Provides clean memory management for all JSON parsing operations
+pub fn ParsedResult(comptime T: type) type {
+    return struct {
+        const Self = @This();
+
+        /// The parsed configuration value
+        value: T,
+
+        /// Arena allocator that owns all memory for this parsed result
+        arena: std.heap.ArenaAllocator,
+
+        /// Initialize with an existing allocator (creates arena)
+        pub fn init(parent_allocator: std.mem.Allocator) Self {
+            return .{
+                .value = undefined,
+                .arena = std.heap.ArenaAllocator.init(parent_allocator),
+            };
+        }
+
+        /// Initialize with a value and parent allocator
+        pub fn initWithValue(value: T, parent_allocator: std.mem.Allocator) Self {
+            return .{
+                .value = value,
+                .arena = std.heap.ArenaAllocator.init(parent_allocator),
+            };
+        }
+
+        /// Cleanup all allocations
+        pub fn deinit(self: *Self) void {
+            self.arena.deinit();
+        }
+
+        /// Get the arena's allocator for parsing operations
+        pub fn allocator(self: *Self) std.mem.Allocator {
+            return self.arena.allocator();
+        }
+    };
+}
 
 pub fn ConfigManager(comptime T: type) type {
     return struct {
@@ -170,9 +229,22 @@ pub fn ConfigManager(comptime T: type) type {
             self.config_data = data;
         }
 
-        pub fn clone(self: *Self) !T {
+        /// Create a deep clone of the current config wrapped in ParsedResult.
+        /// 
+        /// The returned ParsedResult owns all memory via its internal arena allocator.
+        /// You MUST call deinit() on the returned value to avoid memory leaks.
+        ///
+        /// Example:
+        ///   var cloned = try manager.clone();
+        ///   defer cloned.deinit();
+        ///   const config = cloned.value;
+        ///
+        /// Returns: ParsedResult(T) containing the cloned config
+        /// Errors: NoConfigLoaded, OutOfMemory, ParseError
+        pub fn clone(self: *Self) !ParsedResult(T) {
             if (self.config_data == null) return ConfigError.NoConfigLoaded;
 
+            // Serialize current config to JSON string
             const json_string = try json.Stringify.valueAlloc(
                 self.parent_allocator,
                 self.config_data.?,
@@ -180,39 +252,53 @@ pub fn ConfigManager(comptime T: type) type {
             );
             defer self.parent_allocator.free(json_string);
 
-            const parsed = try json.parseFromSlice(
+            // Create ParsedResult with its own arena
+            var result = ParsedResult(T).init(self.parent_allocator);
+            errdefer result.deinit();
+
+            // Parse using leaky variant with arena allocator
+            result.value = try json.parseFromSliceLeaky(
                 T,
-                self.parent_allocator,
+                result.allocator(),
                 json_string,
                 .{ .allocate = .alloc_always },
             );
 
-            return parsed.value;
+            return result;
         }
 
-        pub fn cloneField(self: *Self, comptime FieldType: type, comptime path: []const u8) !FieldType {
+        /// Clone a specific field by path, wrapped in ParsedResult.
+        /// You must call deinit() on the returned ParsedResult to free memory.
+        pub fn cloneField(self: *Self, comptime FieldType: type, comptime path: []const u8) !ParsedResult(FieldType) {
             if (self.config_data == null) return ConfigError.NoConfigLoaded;
 
             const field_value = try self.getField(FieldType, path);
             return try deepCloneValue(FieldType, field_value, self.parent_allocator);
         }
 
-        fn deepCloneValue(comptime FieldType: type, value: FieldType, allocator: std.mem.Allocator) !FieldType {
+        /// Deep clone any value into a ParsedResult
+        fn deepCloneValue(comptime FieldType: type, value: FieldType, parent_allocator: std.mem.Allocator) !ParsedResult(FieldType) {
+            // Serialize to JSON
             const json_string = try json.Stringify.valueAlloc(
-                allocator,
+                parent_allocator,
                 value,
                 .{},
             );
-            defer allocator.free(json_string);
+            defer parent_allocator.free(json_string);
 
-            const parsed = try json.parseFromSlice(
+            // Create ParsedResult with arena
+            var result = ParsedResult(FieldType).init(parent_allocator);
+            errdefer result.deinit();
+
+            // Parse using leaky variant
+            result.value = try json.parseFromSliceLeaky(
                 FieldType,
-                allocator,
+                result.allocator(),
                 json_string,
                 .{ .allocate = .alloc_always },
             );
 
-            return parsed.value;
+            return result;
         }
 
         fn structsEqual(comptime StructType: type, a: StructType, b: StructType, options: DiffOptions) bool {
@@ -513,26 +599,34 @@ pub fn ConfigManager(comptime T: type) type {
             return !structsEqual(FieldType, old_value, new_value, .{});
         }
 
+        /// Snapshot of config state with owned memory
         pub const ConfigSnapshot = struct {
-            config_data: T,
-            allocator: std.mem.Allocator,
+            parsed: ParsedResult(T),
 
+            /// Free snapshot memory
             pub fn deinit(self: *ConfigSnapshot) void {
-                _ = self;
+                self.parsed.deinit();
+            }
+
+            /// Access the snapshot's config value
+            pub fn value(self: *const ConfigSnapshot) T {
+                return self.parsed.value;
             }
         };
 
+        /// Take a snapshot of the current config for later comparison.
+        /// The snapshot owns its memory - you must call deinit() to free it.
         pub fn takeSnapshot(self: *Self) !ConfigSnapshot {
-            const cloned = try self.clone();
+            const parsed = try self.clone();
             return ConfigSnapshot{
-                .config_data = cloned,
-                .allocator = self.parent_allocator,
+                .parsed = parsed,
             };
         }
 
-        pub fn hasChangedSince(self: *Self, snapshot: ConfigSnapshot) bool {
+        /// Compare current config against a snapshot
+        pub fn hasChangedSince(self: *Self, snapshot: *const ConfigSnapshot) bool {
             if (self.config_data == null) return false;
-            return !structsEqual(T, snapshot.config_data, self.config_data.?, .{});
+            return !structsEqual(T, snapshot.value(), self.config_data.?, .{});
         }
 
         fn parsePath(allocator: std.mem.Allocator, path: []const u8) ![]PathSegment {

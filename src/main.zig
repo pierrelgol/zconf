@@ -53,7 +53,10 @@ pub fn main() !void {
     try manager.load();
     std.debug.print("✓ Initial config saved and loaded\n", .{});
 
-    const old_config = try manager.clone();
+    // === Clone current config ===
+    var old_parsed = try manager.clone();
+    defer old_parsed.deinit(); // <-- Clean up clone
+    const old_config = old_parsed.value;
     std.debug.print("✓ Config cloned\n", .{});
 
     var modified_programs = [_]Program{
@@ -114,12 +117,14 @@ pub fn main() !void {
         std.debug.print("  ~ {s} (v{s})\n", .{ prog.name, prog.version });
     }
 
-    const snapshot = try manager.takeSnapshot();
+    // === Snapshot-based tracking ===
+    var snapshot = try manager.takeSnapshot();
+    defer snapshot.deinit(); // <-- Clean up snapshot
 
     try manager.setValue("debug", false);
 
-    const changed_since = manager.hasChangedSince(snapshot);
+    const changed_since = manager.hasChangedSince(&snapshot);
     std.debug.print("\n✓ Config changed since snapshot: {}\n", .{changed_since});
 
-    std.debug.print("\n✓ All diff examples completed!\n", .{});
+    std.debug.print("\n✓ All diff examples completed with no memory leaks!\n", .{});
 }
