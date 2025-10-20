@@ -1,0 +1,28 @@
+{
+  "app_name": "DiffTest",
+  "debug": true,
+  "server": {
+    "host": "localhost",
+    "port": 9090
+  },
+  "programs": [
+    {
+      "name": "program1",
+      "version": "1.1.0",
+      "enabled": true,
+      "path": "/usr/bin/program1"
+    },
+    {
+      "name": "program2",
+      "version": "2.0.0",
+      "enabled": true,
+      "path": "/usr/bin/program2"
+    },
+    {
+      "name": "program4",
+      "version": "1.0.0",
+      "enabled": true,
+      "path": "/usr/bin/program4"
+    }
+  ]
+}

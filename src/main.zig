@@ -1,60 +1,125 @@
 const std = @import("std");
 const zconf = @import("zconf");
 
+const Program = struct {
+    name: []const u8,
+    version: []const u8,
+    enabled: bool,
+    path: []const u8,
+};
+
+const ServerConfig = struct {
+    host: []const u8,
+    port: u16,
+};
+
 const AppConfig = struct {
     app_name: []const u8,
-    port: u16,
-    host: []const u8,
     debug: bool,
-    max_connections: u32,
+    server: ServerConfig,
+    programs: []Program,
 };
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    var gpa_instance = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa_instance.deinit();
+    const gpa = gpa_instance.allocator();
 
-    // Example 1: Create new config manager
-    var manager = try zconf.ConfigManager(AppConfig).init(allocator, "config.json");
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+
+    const allocator = arena.allocator();
+
+    var manager = try zconf.ConfigManager(AppConfig).init(allocator, "app_config.json");
     defer manager.deinit();
 
-    // Example 2: Set default config and save
-    const default_config = AppConfig{
-        .app_name = "MyApp",
-        .port = 8080,
-        .host = "127.0.0.1",
+    var initial_programs = [_]Program{
+        .{ .name = "program1", .version = "1.0.0", .enabled = true, .path = "/usr/bin/program1" },
+        .{ .name = "program2", .version = "2.0.0", .enabled = false, .path = "/usr/bin/program2" },
+        .{ .name = "program3", .version = "1.5.0", .enabled = true, .path = "/usr/bin/program3" },
+    };
+    const initial_config = AppConfig{
+        .app_name = "DiffTest",
         .debug = false,
-        .max_connections = 100,
+        .server = .{
+            .host = "localhost",
+            .port = 8080,
+        },
+        .programs = &initial_programs,
     };
 
-    manager.set(default_config);
+    manager.set(initial_config);
     try manager.save();
-
-    std.debug.print("Config saved to file\n", .{});
-
-    // Example 3: Load config
     try manager.load();
-    if (manager.get()) |config| {
-        std.debug.print("Loaded config: {s}:{}\n", .{ config.host, config.port });
+    std.debug.print("✓ Initial config saved and loaded\n", .{});
+
+    const old_config = try manager.clone();
+    std.debug.print("✓ Config cloned\n", .{});
+
+    var modified_programs = [_]Program{
+        .{ .name = "program1", .version = "1.1.0", .enabled = true, .path = "/usr/bin/program1" },
+
+        .{ .name = "program2", .version = "2.0.0", .enabled = true, .path = "/usr/bin/program2" },
+
+        .{ .name = "program4", .version = "1.0.0", .enabled = true, .path = "/usr/bin/program4" },
+    };
+    const modified_config = AppConfig{
+        .app_name = "DiffTest",
+        .debug = true,
+        .server = .{
+            .host = "localhost",
+            .port = 9090,
+        },
+        .programs = &modified_programs,
+    };
+
+    manager.set(modified_config);
+    try manager.save();
+    try manager.load();
+    const new_config = manager.get().?;
+    std.debug.print("✓ Config modified\n", .{});
+
+    const has_changes = manager.diffConfig(old_config, new_config);
+    std.debug.print("✓ Config has changes: {}\n", .{has_changes});
+
+    const debug_changed = try manager.diffField(bool, "debug", old_config, new_config);
+    std.debug.print("✓ Debug field changed: {}\n", .{debug_changed});
+
+    const port_changed = try manager.diffField(u16, "server.port", old_config, new_config);
+    std.debug.print("✓ Server port changed: {}\n", .{port_changed});
+
+    var diff = try manager.diffSlice(
+        Program,
+        "programs",
+        "name",
+        old_config,
+        new_config,
+        allocator,
+    );
+    defer diff.deinit(allocator);
+
+    std.debug.print("\n=== Programs Diff ===\n", .{});
+    std.debug.print("Added: {} programs\n", .{diff.added.len});
+    for (diff.added) |prog| {
+        std.debug.print("  + {s} (v{s})\n", .{ prog.name, prog.version });
     }
 
-    // Example 4: Modify and save
-    var new_config = manager.get().?;
-    new_config.port = 9090;
-    manager.set(new_config);
-    try manager.save();
+    std.debug.print("Removed: {} programs\n", .{diff.removed.len});
+    for (diff.removed) |prog| {
+        std.debug.print("  - {s} (v{s})\n", .{ prog.name, prog.version });
+    }
 
-    std.debug.print("Config updated: port changed to {}\n", .{new_config.port});
+    std.debug.print("Modified: {} programs\n", .{diff.modified.len});
+    for (diff.modified) |prog| {
+        std.debug.print("  ~ {s} (v{s})\n", .{ prog.name, prog.version });
+    }
 
-    // Example 5: Reload
-    try manager.reload();
-    std.debug.print("Config reloaded from file\n", .{});
+    const snapshot = try manager.takeSnapshot();
 
-    // Example 6: Get or default
-    const final_config = manager.getOrDefault(default_config);
-    std.debug.print("Final config: {s}:{} (debug: {})\n", .{
-        final_config.host,
-        final_config.port,
-        final_config.debug,
-    });
+    try manager.setValue("debug", false);
+
+    const changed_since = manager.hasChangedSince(snapshot);
+    std.debug.print("\n✓ Config changed since snapshot: {}\n", .{changed_since});
+
+    std.debug.print("\n✓ All diff examples completed!\n", .{});
 }
