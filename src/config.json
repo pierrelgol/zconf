@@ -1,0 +1,7 @@
+{
+  "app_name": "MyApp",
+  "port": 9090,
+  "host": "127.0.0.1",
+  "debug": false,
+  "max_connections": 100
+}
