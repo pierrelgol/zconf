@@ -15,11 +15,6 @@ pub const ConfigError = error{
     InvalidIdentityField,
 };
 
-const PathSegment = struct {
-    name: []const u8,
-    index: ?usize = null,
-};
-
 pub fn DiffResult(comptime T: type) type {
     return struct {
         const Self = @This();
@@ -223,34 +218,6 @@ pub fn ConfigManager(comptime T: type) type {
             return result;
         }
 
-        pub fn cloneField(self: *Self, comptime FieldType: type, comptime path: []const u8) !ParsedResult(FieldType) {
-            if (self.config_data == null) return ConfigError.NoConfigLoaded;
-
-            const field_value = try self.getField(FieldType, path);
-            return try deepCloneValue(FieldType, field_value, self.parent_allocator);
-        }
-
-        fn deepCloneValue(comptime FieldType: type, value: FieldType, parent_allocator: std.mem.Allocator) !ParsedResult(FieldType) {
-            const json_string = try json.Stringify.valueAlloc(
-                parent_allocator,
-                value,
-                .{},
-            );
-            defer parent_allocator.free(json_string);
-
-            var result = ParsedResult(FieldType).init(parent_allocator);
-            errdefer result.deinit();
-
-            result.value = try json.parseFromSliceLeaky(
-                FieldType,
-                result.allocator(),
-                json_string,
-                .{ .allocate = .alloc_always },
-            );
-
-            return result;
-        }
-
         fn structsEqual(comptime StructType: type, a: StructType, b: StructType, options: DiffOptions) bool {
             const type_info = @typeInfo(StructType);
 
@@ -332,21 +299,12 @@ pub fn ConfigManager(comptime T: type) type {
         }
 
         pub fn diffSlice(
-            self: *Self,
             comptime ItemType: type,
-            comptime slice_path: []const u8,
             comptime identity_field: []const u8,
-            old_config: T,
-            new_config: T,
+            old_slice: []const ItemType,
+            new_slice: []const ItemType,
             allocator: std.mem.Allocator,
         ) !DiffResult(ItemType) {
-            _ = self;
-
-            const SliceType = []ItemType;
-
-            const old_slice = try getSliceFromConfig(SliceType, old_config, slice_path);
-            const new_slice = try getSliceFromConfig(SliceType, new_config, slice_path);
-
             return try diffSlicesByIdentity(
                 ItemType,
                 identity_field,
@@ -358,21 +316,13 @@ pub fn ConfigManager(comptime T: type) type {
         }
 
         pub fn diffSliceWithOptions(
-            self: *Self,
             comptime ItemType: type,
-            comptime slice_path: []const u8,
             comptime identity_field: []const u8,
-            old_config: T,
-            new_config: T,
+            old_slice: []const ItemType,
+            new_slice: []const ItemType,
             allocator: std.mem.Allocator,
             options: DiffOptions,
         ) !DiffResult(ItemType) {
-            _ = self;
-
-            const SliceType = []ItemType;
-            const old_slice = try getSliceFromConfig(SliceType, old_config, slice_path);
-            const new_slice = try getSliceFromConfig(SliceType, new_config, slice_path);
-
             return try diffSlicesByIdentity(
                 ItemType,
                 identity_field,
@@ -381,63 +331,6 @@ pub fn ConfigManager(comptime T: type) type {
                 allocator,
                 options,
             );
-        }
-
-        fn getSliceFromConfig(comptime SliceType: type, config: T, comptime path: []const u8) !SliceType {
-            comptime var segment_count: usize = 1;
-            comptime var i: usize = 0;
-            comptime {
-                while (i < path.len) : (i += 1) {
-                    if (path[i] == '.') segment_count += 1;
-                }
-            }
-
-            const segments = comptime blk: {
-                var segs: [segment_count][]const u8 = undefined;
-                var seg_idx: usize = 0;
-                var start: usize = 0;
-                i = 0;
-                while (i <= path.len) : (i += 1) {
-                    if (i == path.len or path[i] == '.') {
-                        segs[seg_idx] = path[start..i];
-                        seg_idx += 1;
-                        start = i + 1;
-                    }
-                }
-                break :blk segs;
-            };
-
-            return getSliceBySegments(SliceType, T, config, &segments);
-        }
-
-        fn getSliceBySegments(comptime SliceType: type, comptime RootType: type, root: RootType, comptime segments: []const []const u8) !SliceType {
-            if (segments.len == 0) return ConfigError.InvalidPath;
-
-            const segment = segments[0];
-            if (segment.len == 0) return ConfigError.InvalidPath;
-
-            const type_info = @typeInfo(RootType);
-            switch (type_info) {
-                .@"struct" => |struct_info| {
-                    inline for (struct_info.fields) |field| {
-                        if (std.mem.eql(u8, field.name, segment)) {
-                            const field_value = @field(root, field.name);
-                            const FieldType = @TypeOf(field_value);
-
-                            if (segments.len == 1) {
-                                if (FieldType != SliceType) {
-                                    return ConfigError.TypeMismatch;
-                                }
-                                return field_value;
-                            }
-
-                            return getSliceBySegments(SliceType, FieldType, field_value, segments[1..]);
-                        }
-                    }
-                    return ConfigError.FieldNotFound;
-                },
-                else => return ConfigError.FieldNotFound,
-            }
         }
 
         fn diffSlicesByIdentity(
@@ -533,22 +426,6 @@ pub fn ConfigManager(comptime T: type) type {
             return !structsEqual(T, old_config, new_config, .{});
         }
 
-        pub fn diffField(
-            self: *Self,
-            comptime FieldType: type,
-            comptime path: []const u8,
-            old_config: T,
-            new_config: T,
-        ) !bool {
-            const segments = try parsePath(self.parent_allocator, path);
-            defer self.parent_allocator.free(segments);
-
-            const old_value = try getFieldByPathTyped(FieldType, T, old_config, segments);
-            const new_value = try getFieldByPathTyped(FieldType, T, new_config, segments);
-
-            return !structsEqual(FieldType, old_value, new_value, .{});
-        }
-
         pub const ConfigSnapshot = struct {
             parsed: ParsedResult(T),
 
@@ -571,146 +448,6 @@ pub fn ConfigManager(comptime T: type) type {
         pub fn hasChangedSince(self: *Self, snapshot: *const ConfigSnapshot) bool {
             if (self.config_data == null) return false;
             return !structsEqual(T, snapshot.value(), self.config_data.?, .{});
-        }
-
-        fn parsePath(allocator: std.mem.Allocator, path: []const u8) ![]PathSegment {
-            var count: usize = 0;
-            var iterator = std.mem.splitScalar(u8, path, '.');
-            while (iterator.next()) |segment| {
-                if (segment.len == 0) return ConfigError.InvalidPath;
-                count += 1;
-            }
-
-            if (count == 0) return ConfigError.InvalidPath;
-
-            const segments = try allocator.alloc(PathSegment, count);
-            errdefer allocator.free(segments);
-
-            var iter = std.mem.splitScalar(u8, path, '.');
-            var i: usize = 0;
-            while (iter.next()) |segment| {
-                segments[i] = .{ .name = segment };
-                i += 1;
-            }
-
-            return segments;
-        }
-
-        pub fn getField(self: *Self, comptime FieldType: type, comptime path: []const u8) !FieldType {
-            if (self.config_data == null) return ConfigError.NoConfigLoaded;
-
-            const segments = try parsePath(self.parent_allocator, path);
-            defer self.parent_allocator.free(segments);
-
-            return try getFieldByPathTyped(FieldType, T, self.config_data.?, segments);
-        }
-
-        fn getFieldByPathTyped(comptime FieldType: type, comptime RootType: type, root: RootType, segments: []const PathSegment) !FieldType {
-            if (segments.len == 0) return ConfigError.InvalidPath;
-
-            const segment = segments[0];
-            const type_info = @typeInfo(RootType);
-
-            switch (type_info) {
-                .@"struct" => |struct_info| {
-                    inline for (struct_info.fields) |field| {
-                        if (std.mem.eql(u8, field.name, segment.name)) {
-                            const field_value = @field(root, field.name);
-                            const ActualType = @TypeOf(field_value);
-
-                            if (segments.len == 1) {
-                                if (ActualType != FieldType) return ConfigError.TypeMismatch;
-                                return field_value;
-                            }
-
-                            return try getFieldByPathTyped(FieldType, ActualType, field_value, segments[1..]);
-                        }
-                    }
-
-                    return ConfigError.FieldNotFound;
-                },
-                else => return ConfigError.FieldNotFound,
-            }
-        }
-
-        pub fn getValueOrDefault(self: *Self, comptime path: []const u8, default: anytype) @TypeOf(default) {
-            const DefaultType = @TypeOf(default);
-            const value = self.getField(DefaultType, path) catch return default;
-            return value;
-        }
-
-        pub fn setValue(self: *Self, comptime path: []const u8, value: anytype) !void {
-            if (self.config_data == null) return ConfigError.NoConfigLoaded;
-
-            const segments = try parsePath(self.parent_allocator, path);
-            defer self.parent_allocator.free(segments);
-
-            try setFieldByPath(T, &self.config_data.?, segments, value);
-        }
-
-        fn setFieldByPath(comptime RootType: type, root: *RootType, segments: []const PathSegment, value: anytype) !void {
-            if (segments.len == 0) return ConfigError.InvalidPath;
-
-            const segment = segments[0];
-            const ValueType = @TypeOf(value);
-            const type_info = @typeInfo(RootType);
-
-            switch (type_info) {
-                .@"struct" => |struct_info| {
-                    inline for (struct_info.fields) |field| {
-                        if (std.mem.eql(u8, field.name, segment.name)) {
-                            const field_ptr = &@field(root.*, field.name);
-                            const FieldType = @TypeOf(field_ptr.*);
-
-                            if (segments.len == 1) {
-                                if (FieldType != ValueType) return ConfigError.TypeMismatch;
-                                field_ptr.* = value;
-                                return;
-                            }
-
-                            try setFieldByPath(FieldType, field_ptr, segments[1..], value);
-                            return;
-                        }
-                    }
-
-                    return ConfigError.FieldNotFound;
-                },
-                else => return ConfigError.FieldNotFound,
-            }
-        }
-
-        pub fn hasField(self: *Self, comptime path: []const u8) bool {
-            if (self.config_data == null) return false;
-
-            const segments = parsePath(self.parent_allocator, path) catch return false;
-            defer self.parent_allocator.free(segments);
-
-            return checkFieldExists(T, self.config_data.?, segments);
-        }
-
-        fn checkFieldExists(comptime RootType: type, root: RootType, segments: []const PathSegment) bool {
-            if (segments.len == 0) return false;
-
-            const segment = segments[0];
-            const type_info = @typeInfo(RootType);
-
-            switch (type_info) {
-                .@"struct" => |struct_info| {
-                    inline for (struct_info.fields) |field| {
-                        if (std.mem.eql(u8, field.name, segment.name)) {
-                            if (segments.len == 1) return true;
-
-                            const field_value = @field(root, field.name);
-                            const FieldType = @TypeOf(field_value);
-
-                            return checkFieldExists(FieldType, field_value, segments[1..]);
-                        }
-                    }
-
-                    return false;
-                },
-                else => return false,
-            }
         }
     };
 }
@@ -1093,243 +830,6 @@ test "ConfigManager - clone handles slices" {
     try testing.expectEqual(3, cloned.value.items[2]);
 }
 
-test "ConfigManager - cloneField copies specific field" {
-    const Config = struct { a: i32, b: i32 };
-
-    const test_file = "test_clone_field.json";
-    defer std.fs.cwd().deleteFile(test_file) catch {};
-
-    const file = try std.fs.cwd().createFile(test_file, .{});
-    try file.writeAll("{\"a\": 10, \"b\": 20}");
-    file.close();
-
-    var manager = try ConfigManager(Config).init(testing.allocator, test_file);
-    defer manager.deinit();
-
-    try manager.load();
-
-    var cloned_field = try manager.cloneField(i32, "b");
-    defer cloned_field.deinit();
-
-    try testing.expectEqual(20, cloned_field.value);
-}
-
-test "ConfigManager - getField retrieves top-level field" {
-    const Config = struct { value: i32 };
-
-    const test_file = "test_getfield.json";
-    defer std.fs.cwd().deleteFile(test_file) catch {};
-
-    const file = try std.fs.cwd().createFile(test_file, .{});
-    try file.writeAll("{\"value\": 42}");
-    file.close();
-
-    var manager = try ConfigManager(Config).init(testing.allocator, test_file);
-    defer manager.deinit();
-
-    try manager.load();
-
-    const value = try manager.getField(i32, "value");
-    try testing.expectEqual(42, value);
-}
-
-test "ConfigManager - getField retrieves nested field" {
-    const Inner = struct { x: i32 };
-    const Config = struct { inner: Inner };
-
-    const test_file = "test_getfield_nested.json";
-    defer std.fs.cwd().deleteFile(test_file) catch {};
-
-    const file = try std.fs.cwd().createFile(test_file, .{});
-    try file.writeAll("{\"inner\": {\"x\": 99}}");
-    file.close();
-
-    var manager = try ConfigManager(Config).init(testing.allocator, test_file);
-    defer manager.deinit();
-
-    try manager.load();
-
-    const value = try manager.getField(i32, "inner.x");
-    try testing.expectEqual(99, value);
-}
-
-test "ConfigManager - getField returns TypeMismatch for wrong type" {
-    const Config = struct { value: i32 };
-
-    const test_file = "test_type_mismatch.json";
-    defer std.fs.cwd().deleteFile(test_file) catch {};
-
-    const file = try std.fs.cwd().createFile(test_file, .{});
-    try file.writeAll("{\"value\": 42}");
-    file.close();
-
-    var manager = try ConfigManager(Config).init(testing.allocator, test_file);
-    defer manager.deinit();
-
-    try manager.load();
-
-    try testing.expectError(ConfigError.TypeMismatch, manager.getField(bool, "value"));
-}
-
-test "ConfigManager - getField returns FieldNotFound" {
-    const Config = struct { value: i32 };
-
-    const test_file = "test_field_not_found.json";
-    defer std.fs.cwd().deleteFile(test_file) catch {};
-
-    const file = try std.fs.cwd().createFile(test_file, .{});
-    try file.writeAll("{\"value\": 42}");
-    file.close();
-
-    var manager = try ConfigManager(Config).init(testing.allocator, test_file);
-    defer manager.deinit();
-
-    try manager.load();
-
-    try testing.expectError(ConfigError.FieldNotFound, manager.getField(i32, "nonexistent"));
-}
-
-test "ConfigManager - getField returns NoConfigLoaded" {
-    const Config = struct { value: i32 };
-
-    var manager = try ConfigManager(Config).init(testing.allocator, "test.json");
-    defer manager.deinit();
-
-    try testing.expectError(ConfigError.NoConfigLoaded, manager.getField(i32, "value"));
-}
-
-test "ConfigManager - setValue sets top-level field" {
-    const Config = struct { value: i32 };
-
-    var manager = try ConfigManager(Config).init(testing.allocator, "test.json");
-    defer manager.deinit();
-
-    manager.set(.{ .value = 10 });
-
-    try manager.setValue("value", @as(i32, 20));
-
-    const value = try manager.getField(i32, "value");
-    try testing.expectEqual(20, value);
-}
-
-test "ConfigManager - setValue sets nested field" {
-    const Inner = struct { x: i32 };
-    const Config = struct { inner: Inner };
-
-    var manager = try ConfigManager(Config).init(testing.allocator, "test.json");
-    defer manager.deinit();
-
-    manager.set(.{ .inner = .{ .x = 10 } });
-
-    try manager.setValue("inner.x", @as(i32, 50));
-
-    const value = try manager.getField(i32, "inner.x");
-    try testing.expectEqual(50, value);
-}
-
-test "ConfigManager - setValue returns NoConfigLoaded" {
-    const Config = struct { value: i32 };
-
-    var manager = try ConfigManager(Config).init(testing.allocator, "test.json");
-    defer manager.deinit();
-
-    try testing.expectError(ConfigError.NoConfigLoaded, manager.setValue("value", @as(i32, 10)));
-}
-
-test "ConfigManager - getValueOrDefault returns field value" {
-    const Config = struct { value: i32 };
-
-    const test_file = "test_default.json";
-    defer std.fs.cwd().deleteFile(test_file) catch {};
-
-    const file = try std.fs.cwd().createFile(test_file, .{});
-    try file.writeAll("{\"value\": 42}");
-    file.close();
-
-    var manager = try ConfigManager(Config).init(testing.allocator, test_file);
-    defer manager.deinit();
-
-    try manager.load();
-
-    const value = manager.getValueOrDefault("value", @as(i32, 0));
-    try testing.expectEqual(42, value);
-}
-
-test "ConfigManager - getValueOrDefault returns default on error" {
-    const Config = struct { value: i32 };
-
-    var manager = try ConfigManager(Config).init(testing.allocator, "test.json");
-    defer manager.deinit();
-
-    const value = manager.getValueOrDefault("value", @as(i32, 100));
-    try testing.expectEqual(100, value);
-}
-
-test "ConfigManager - hasField returns true for existing field" {
-    const Config = struct { value: i32 };
-
-    const test_file = "test_hasfield.json";
-    defer std.fs.cwd().deleteFile(test_file) catch {};
-
-    const file = try std.fs.cwd().createFile(test_file, .{});
-    try file.writeAll("{\"value\": 42}");
-    file.close();
-
-    var manager = try ConfigManager(Config).init(testing.allocator, test_file);
-    defer manager.deinit();
-
-    try manager.load();
-
-    try testing.expect(manager.hasField("value"));
-}
-
-test "ConfigManager - hasField returns false for nonexistent field" {
-    const Config = struct { value: i32 };
-
-    const test_file = "test_hasfield_false.json";
-    defer std.fs.cwd().deleteFile(test_file) catch {};
-
-    const file = try std.fs.cwd().createFile(test_file, .{});
-    try file.writeAll("{\"value\": 42}");
-    file.close();
-
-    var manager = try ConfigManager(Config).init(testing.allocator, test_file);
-    defer manager.deinit();
-
-    try manager.load();
-
-    try testing.expect(!manager.hasField("nonexistent"));
-}
-
-test "ConfigManager - hasField works with nested fields" {
-    const Inner = struct { x: i32 };
-    const Config = struct { inner: Inner };
-
-    const test_file = "test_hasfield_nested.json";
-    defer std.fs.cwd().deleteFile(test_file) catch {};
-
-    const file = try std.fs.cwd().createFile(test_file, .{});
-    try file.writeAll("{\"inner\": {\"x\": 99}}");
-    file.close();
-
-    var manager = try ConfigManager(Config).init(testing.allocator, test_file);
-    defer manager.deinit();
-
-    try manager.load();
-
-    try testing.expect(manager.hasField("inner.x"));
-    try testing.expect(!manager.hasField("inner.y"));
-}
-
-test "ConfigManager - hasField returns false when no config" {
-    const Config = struct { value: i32 };
-
-    var manager = try ConfigManager(Config).init(testing.allocator, "test.json");
-    defer manager.deinit();
-
-    try testing.expect(!manager.hasField("value"));
-}
-
 test "ConfigManager - diffConfig detects changes" {
     const Config = struct { value: i32 };
 
@@ -1370,46 +870,6 @@ test "ConfigManager - diffConfig with nested structs" {
     try testing.expect(has_changes);
 }
 
-test "ConfigManager - diffField detects field change" {
-    const Config = struct { a: i32, b: i32 };
-
-    var manager = try ConfigManager(Config).init(testing.allocator, "test.json");
-    defer manager.deinit();
-
-    const old_config = Config{ .a = 1, .b = 2 };
-    const new_config = Config{ .a = 1, .b = 3 };
-
-    const changed = try manager.diffField(i32, "b", old_config, new_config);
-    try testing.expect(changed);
-}
-
-test "ConfigManager - diffField detects no change" {
-    const Config = struct { a: i32, b: i32 };
-
-    var manager = try ConfigManager(Config).init(testing.allocator, "test.json");
-    defer manager.deinit();
-
-    const old_config = Config{ .a = 1, .b = 2 };
-    const new_config = Config{ .a = 1, .b = 2 };
-
-    const changed = try manager.diffField(i32, "b", old_config, new_config);
-    try testing.expect(!changed);
-}
-
-test "ConfigManager - diffField with nested path" {
-    const Inner = struct { x: i32, y: i32 };
-    const Config = struct { inner: Inner };
-
-    var manager = try ConfigManager(Config).init(testing.allocator, "test.json");
-    defer manager.deinit();
-
-    const old_config = Config{ .inner = .{ .x = 10, .y = 20 } };
-    const new_config = Config{ .inner = .{ .x = 10, .y = 30 } };
-
-    const changed = try manager.diffField(i32, "inner.y", old_config, new_config);
-    try testing.expect(changed);
-}
-
 test "ConfigManager - diffConfig compares string contents" {
     const Config = struct { name: []const u8 };
 
@@ -1441,10 +901,6 @@ test "ConfigManager - diffConfig with slices" {
 
 test "ConfigManager - diffSlice detects added items" {
     const Item = struct { id: i32, name: []const u8 };
-    const Config = struct { items: []Item };
-
-    var manager = try ConfigManager(Config).init(testing.allocator, "test.json");
-    defer manager.deinit();
 
     var old_items = [_]Item{.{ .id = 1, .name = "one" }};
     var new_items = [_]Item{
@@ -1452,10 +908,8 @@ test "ConfigManager - diffSlice detects added items" {
         .{ .id = 2, .name = "two" },
     };
 
-    const old_config = Config{ .items = &old_items };
-    const new_config = Config{ .items = &new_items };
-
-    var diff = try manager.diffSlice(Item, "items", "id", old_config, new_config, testing.allocator);
+    const Config = struct {};
+    var diff = try ConfigManager(Config).diffSlice(Item, "id", &old_items, &new_items, testing.allocator);
     defer diff.deinit(testing.allocator);
 
     try testing.expectEqual(1, diff.added.len);
@@ -1464,10 +918,6 @@ test "ConfigManager - diffSlice detects added items" {
 
 test "ConfigManager - diffSlice detects removed items" {
     const Item = struct { id: i32, name: []const u8 };
-    const Config = struct { items: []Item };
-
-    var manager = try ConfigManager(Config).init(testing.allocator, "test.json");
-    defer manager.deinit();
 
     var old_items = [_]Item{
         .{ .id = 1, .name = "one" },
@@ -1475,10 +925,8 @@ test "ConfigManager - diffSlice detects removed items" {
     };
     var new_items = [_]Item{.{ .id = 1, .name = "one" }};
 
-    const old_config = Config{ .items = &old_items };
-    const new_config = Config{ .items = &new_items };
-
-    var diff = try manager.diffSlice(Item, "items", "id", old_config, new_config, testing.allocator);
+    const Config = struct {};
+    var diff = try ConfigManager(Config).diffSlice(Item, "id", &old_items, &new_items, testing.allocator);
     defer diff.deinit(testing.allocator);
 
     try testing.expectEqual(1, diff.removed.len);
@@ -1487,18 +935,12 @@ test "ConfigManager - diffSlice detects removed items" {
 
 test "ConfigManager - diffSlice detects modified items" {
     const Item = struct { id: i32, name: []const u8 };
-    const Config = struct { items: []Item };
-
-    var manager = try ConfigManager(Config).init(testing.allocator, "test.json");
-    defer manager.deinit();
 
     var old_items = [_]Item{.{ .id = 1, .name = "old_name" }};
     var new_items = [_]Item{.{ .id = 1, .name = "new_name" }};
 
-    const old_config = Config{ .items = &old_items };
-    const new_config = Config{ .items = &new_items };
-
-    var diff = try manager.diffSlice(Item, "items", "id", old_config, new_config, testing.allocator);
+    const Config = struct {};
+    var diff = try ConfigManager(Config).diffSlice(Item, "id", &old_items, &new_items, testing.allocator);
     defer diff.deinit(testing.allocator);
 
     try testing.expectEqual(1, diff.modified.len);
@@ -1507,58 +949,25 @@ test "ConfigManager - diffSlice detects modified items" {
 
 test "ConfigManager - diffSlice with no changes" {
     const Item = struct { id: i32, name: []const u8 };
-    const Config = struct { items: []Item };
-
-    var manager = try ConfigManager(Config).init(testing.allocator, "test.json");
-    defer manager.deinit();
 
     var old_items = [_]Item{.{ .id = 1, .name = "one" }};
     var new_items = [_]Item{.{ .id = 1, .name = "one" }};
 
-    const old_config = Config{ .items = &old_items };
-    const new_config = Config{ .items = &new_items };
-
-    var diff = try manager.diffSlice(Item, "items", "id", old_config, new_config, testing.allocator);
+    const Config = struct {};
+    var diff = try ConfigManager(Config).diffSlice(Item, "id", &old_items, &new_items, testing.allocator);
     defer diff.deinit(testing.allocator);
 
     try testing.expect(!diff.hasChanges());
 }
 
-test "ConfigManager - diffSlice with nested slice path" {
-    const Item = struct { id: i32 };
-    const Inner = struct { items: []Item };
-    const Config = struct { inner: Inner };
-
-    var manager = try ConfigManager(Config).init(testing.allocator, "test.json");
-    defer manager.deinit();
-
-    var old_items = [_]Item{.{ .id = 1 }};
-    var new_items = [_]Item{.{ .id = 2 }};
-
-    const old_config = Config{ .inner = .{ .items = &old_items } };
-    const new_config = Config{ .inner = .{ .items = &new_items } };
-
-    var diff = try manager.diffSlice(Item, "inner.items", "id", old_config, new_config, testing.allocator);
-    defer diff.deinit(testing.allocator);
-
-    try testing.expectEqual(1, diff.added.len);
-    try testing.expectEqual(1, diff.removed.len);
-}
-
 test "ConfigManager - diffSlice with string identity field" {
     const Item = struct { name: []const u8, value: i32 };
-    const Config = struct { items: []Item };
-
-    var manager = try ConfigManager(Config).init(testing.allocator, "test.json");
-    defer manager.deinit();
 
     var old_items = [_]Item{.{ .name = "item1", .value = 10 }};
     var new_items = [_]Item{.{ .name = "item1", .value = 20 }};
 
-    const old_config = Config{ .items = &old_items };
-    const new_config = Config{ .items = &new_items };
-
-    var diff = try manager.diffSlice(Item, "items", "name", old_config, new_config, testing.allocator);
+    const Config = struct {};
+    var diff = try ConfigManager(Config).diffSlice(Item, "name", &old_items, &new_items, testing.allocator);
     defer diff.deinit(testing.allocator);
 
     try testing.expectEqual(1, diff.modified.len);
@@ -1566,10 +975,6 @@ test "ConfigManager - diffSlice with string identity field" {
 
 test "ConfigManager - diffSlice with multiple changes" {
     const Item = struct { id: i32, value: i32 };
-    const Config = struct { items: []Item };
-
-    var manager = try ConfigManager(Config).init(testing.allocator, "test.json");
-    defer manager.deinit();
 
     var old_items = [_]Item{
         .{ .id = 1, .value = 10 },
@@ -1582,10 +987,8 @@ test "ConfigManager - diffSlice with multiple changes" {
         .{ .id = 4, .value = 40 },
     };
 
-    const old_config = Config{ .items = &old_items };
-    const new_config = Config{ .items = &new_items };
-
-    var diff = try manager.diffSlice(Item, "items", "id", old_config, new_config, testing.allocator);
+    const Config = struct {};
+    var diff = try ConfigManager(Config).diffSlice(Item, "id", &old_items, &new_items, testing.allocator);
     defer diff.deinit(testing.allocator);
 
     try testing.expectEqual(1, diff.added.len);
@@ -1596,16 +999,11 @@ test "ConfigManager - diffSlice with multiple changes" {
 
 test "ConfigManager - diffSlice with empty slices" {
     const Item = struct { id: i32 };
-    const Config = struct { items: []Item };
-
-    var manager = try ConfigManager(Config).init(testing.allocator, "test.json");
-    defer manager.deinit();
 
     var empty = [_]Item{};
-    const old_config = Config{ .items = &empty };
-    const new_config = Config{ .items = &empty };
 
-    var diff = try manager.diffSlice(Item, "items", "id", old_config, new_config, testing.allocator);
+    const Config = struct {};
+    var diff = try ConfigManager(Config).diffSlice(Item, "id", &empty, &empty, testing.allocator);
     defer diff.deinit(testing.allocator);
 
     try testing.expect(!diff.hasChanges());
@@ -1613,16 +1011,9 @@ test "ConfigManager - diffSlice with empty slices" {
 
 test "ConfigManager - diffSliceWithOptions with custom options" {
     const Item = struct { id: i32, value: i32 };
-    const Config = struct { items: []Item };
-
-    var manager = try ConfigManager(Config).init(testing.allocator, "test.json");
-    defer manager.deinit();
 
     var old_items = [_]Item{.{ .id = 1, .value = 10 }};
     var new_items = [_]Item{.{ .id = 1, .value = 20 }};
-
-    const old_config = Config{ .items = &old_items };
-    const new_config = Config{ .items = &new_items };
 
     const options = DiffOptions{
         .deep_compare = true,
@@ -1630,12 +1021,12 @@ test "ConfigManager - diffSliceWithOptions with custom options" {
         .include_unchanged = false,
     };
 
-    var diff = try manager.diffSliceWithOptions(
+    const Config = struct {};
+    var diff = try ConfigManager(Config).diffSliceWithOptions(
         Item,
-        "items",
         "id",
-        old_config,
-        new_config,
+        &old_items,
+        &new_items,
         testing.allocator,
         options,
     );
@@ -1732,96 +1123,6 @@ test "ConfigManager - hasChangedSince returns false when no config" {
     try testing.expect(!manager.hasChangedSince(&snapshot));
 }
 
-test "Path parsing - single segment" {
-    const Config = struct { value: i32 };
-
-    const test_file = "test_path_single.json";
-    defer std.fs.cwd().deleteFile(test_file) catch {};
-
-    const file = try std.fs.cwd().createFile(test_file, .{});
-    try file.writeAll("{\"value\": 42}");
-    file.close();
-
-    var manager = try ConfigManager(Config).init(testing.allocator, test_file);
-    defer manager.deinit();
-
-    try manager.load();
-
-    const value = try manager.getField(i32, "value");
-    try testing.expectEqual(42, value);
-}
-
-test "Path parsing - multiple segments" {
-    const Level3 = struct { val: i32 };
-    const Level2 = struct { level3: Level3 };
-    const Config = struct { level2: Level2 };
-
-    const test_file = "test_path_multi.json";
-    defer std.fs.cwd().deleteFile(test_file) catch {};
-
-    const file = try std.fs.cwd().createFile(test_file, .{});
-    try file.writeAll("{\"level2\": {\"level3\": {\"val\": 99}}}");
-    file.close();
-
-    var manager = try ConfigManager(Config).init(testing.allocator, test_file);
-    defer manager.deinit();
-
-    try manager.load();
-
-    const value = try manager.getField(i32, "level2.level3.val");
-    try testing.expectEqual(99, value);
-}
-
-test "Path parsing - empty segment returns InvalidPath" {
-    const Config = struct { value: i32 };
-
-    const test_file = "test_empty_path.json";
-    defer std.fs.cwd().deleteFile(test_file) catch {};
-
-    const file = try std.fs.cwd().createFile(test_file, .{});
-    try file.writeAll("{\"value\": 42}");
-    file.close();
-
-    var manager = try ConfigManager(Config).init(testing.allocator, test_file);
-    defer manager.deinit();
-
-    try manager.load();
-
-    try testing.expectError(ConfigError.InvalidPath, manager.getField(i32, "value..nested"));
-}
-
-test "Path parsing - setValue with empty path returns InvalidPath" {
-    const Config = struct { value: i32 };
-
-    var manager = try ConfigManager(Config).init(testing.allocator, "test.json");
-    defer manager.deinit();
-
-    manager.set(.{ .value = 10 });
-
-    try testing.expectError(ConfigError.InvalidPath, manager.setValue("", @as(i32, 20)));
-}
-
-test "Path parsing - complex nested structure" {
-    const Item = struct { id: i32 };
-    const Inner = struct { items: []Item, count: i32 };
-    const Config = struct { data: Inner };
-
-    const test_file = "test_complex_nested.json";
-    defer std.fs.cwd().deleteFile(test_file) catch {};
-
-    const file = try std.fs.cwd().createFile(test_file, .{});
-    try file.writeAll("{\"data\": {\"items\": [{\"id\": 1}], \"count\": 5}}");
-    file.close();
-
-    var manager = try ConfigManager(Config).init(testing.allocator, test_file);
-    defer manager.deinit();
-
-    try manager.load();
-
-    const count = try manager.getField(i32, "data.count");
-    try testing.expectEqual(5, count);
-}
-
 test "Edge case - large config with many fields" {
     const Config = struct {
         field1: i32,
@@ -1881,7 +1182,9 @@ test "Integration - load, modify, save, reload workflow" {
     try manager.load();
     try testing.expectEqual(10, manager.get().?.value);
 
-    try manager.setValue("value", @as(i32, 20));
+    var config = manager.get().?;
+    config.value = 20;
+    manager.set(config);
 
     try manager.save();
 
@@ -1934,7 +1237,9 @@ test "Integration - snapshot, modify, compare workflow" {
 
     try testing.expect(!manager.hasChangedSince(&snapshot));
 
-    try manager.setValue("b", @as(i32, 20));
+    var config = manager.get().?;
+    config.b = 20;
+    manager.set(config);
 
     try testing.expect(manager.hasChangedSince(&snapshot));
 }
@@ -1956,7 +1261,9 @@ test "Edge case - boolean field handling" {
 
     try testing.expect(manager.get().?.enabled);
 
-    try manager.setValue("enabled", false);
+    var config = manager.get().?;
+    config.enabled = false;
+    manager.set(config);
     try testing.expect(!manager.get().?.enabled);
 }
 
@@ -1975,7 +1282,7 @@ test "Edge case - string field handling" {
 
     try manager.load();
 
-    const name = try manager.getField([]const u8, "name");
+    const name = manager.get().?.name;
     try testing.expectEqualStrings("test_name", name);
 }
 
@@ -1994,7 +1301,7 @@ test "Edge case - array field handling" {
 
     try manager.load();
 
-    const values = try manager.getField([3]i32, "values");
+    const values = manager.get().?.values;
     try testing.expectEqual(1, values[0]);
     try testing.expectEqual(2, values[1]);
     try testing.expectEqual(3, values[2]);
